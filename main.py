@@ -136,26 +136,25 @@ def main(raw_data_strings):
     """
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('Using device:', device)
+
     train_val_split = 0.9
     context_size = 8
     batch_size = 256
     n_iters = 10000
     n_eval_iters = 200
 
-    print('Using device:', device)
-
     # ----------------------------------------------------------------------------
     # Create Vocab
     # ----------------------------------------------------------------------------
-    # Get list of all unique characters in the dataset
-    unique_char = set(raw_data_strings)
+    unique_char = set(raw_data_strings)  # Get list of all unique characters in the dataset
     unique_char = sorted(unique_char)
     vocab_size = len(unique_char)
 
-    print("Number of unique characters {}:\n{}".format(vocab_size, unique_char))
+    print("Unique characters (Total= {}):\n{}".format(vocab_size, unique_char))
 
     # ----------------------------------------------------------------------------
-    # Tokenize the text - Convert input_data to integer repr
+    # Tokenize the text - Convert input_data to integer representation
     # character level vocab
     # ----------------------------------------------------------------------------
     ctoi = {c: i for i, c in enumerate(unique_char)}  # dictionary for mapping character to i
@@ -169,10 +168,10 @@ def main(raw_data_strings):
     # # print("'{}' encoded as :  {}".format(test_string, encode(test_string)))
     # # print("Decoded test string is '{}'".format(decode(encode(test_string))))
     #
-    # # Other more standard encoder/decodes
-    # import tiktoken
-    # encoder = tiktoken.get_encoding('gpt2')
-    # y= encoder.encode(test_string)
+    # # Other more 'standard' tokenizers
+    # import tiktoken # uses by GPT.
+    # encoder = tiktoken.get_encoding('gpt2')  # Bit-pair encoding
+    # y = encoder.encode(test_string)
 
     input_data = encode(raw_data_strings)  # converted to integers
     input_data = torch.tensor(input_data, dtype=torch.long)
@@ -216,8 +215,8 @@ def main(raw_data_strings):
     # logits, loss = model1(x_in, y_label)
     # print("Loss {}".format(loss))
 
-    # Get some predicted names
-    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 7)
+    # Get some predicts
+    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 50)
     output = ''.join(itoc[i.item()] for i in predicts[0])
     print("Generated text {}".format(output))
 
@@ -228,6 +227,8 @@ def main(raw_data_strings):
     optimizer = torch.optim.Adam(model1.parameters(), lr=1e-3)
 
     model1.train()
+    yb_loss = 0
+    idx = 0
     for idx in range(n_iters):
         xb, yb = get_batch('train', batch_size, context_size, train_data, val_data,device)
 
@@ -249,7 +250,7 @@ def main(raw_data_strings):
     # Test the model
     # ----------------------------------------------------------------------------
     # Get some predicted names
-    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 7)
+    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 50)
     output = ''.join(itoc[i.item()] for i in predicts[0])
     print("Generated text after training: {}".format(output))
 
