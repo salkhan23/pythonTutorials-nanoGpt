@@ -111,7 +111,7 @@ class BigramLanguageModel(nn.Module):
         return input_idx_arr
 
 
-@torch.no_grad
+# @torch.no_grad
 def evaluate_loss(model, eval_iters, b_size, max_c_len, t_data, v_data, device):
     model.eval()
     loss = {}
