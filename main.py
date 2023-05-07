@@ -104,7 +104,175 @@ class BigramLanguageModel(nn.Module):
             # Get the last time, set of logits
             probs = F.softmax(logits2, dim=1)
 
-            # chooses 1 (num_samples) of probs, based on probabilies specifed in probs
+            # chooses 1 (num_samples) of probs, based on probabilities specified in probs
+            idx_next = torch.multinomial(probs, num_samples=1, replacement=True)
+            input_idx_arr = torch.cat((input_idx_arr, idx_next), dim=1)  # on time axes
+
+        return input_idx_arr
+
+
+class Head(nn.Module):
+    def __init__(self, head_size_1, embed_dim1, context_size_1):
+        """
+        Implements a single head of self attention
+
+        :param head_size_1:
+        :param embed_dim1:
+        :return:
+        """
+        super().__init__()
+        self.head_size = head_size_1
+        self.embed_dim = embed_dim1
+        self.context_size = context_size_1
+
+        self.key = nn.Linear(self.embed_dim, self.head_size, bias=False)
+        # with bias = False, is just a matrix multipy
+        # matrix multiple is  [self.embed_size, self.head_size]
+
+        self.query = nn.Linear(self.embed_dim, self.head_size, bias=False)
+        self.value = nn.Linear(self.embed_dim, self.head_size, bias=False)
+
+        # Creates a variable with name tril (referenced as self.tril)
+        # Trill is not a parameter of the model. It is fixed. Pytorch uses register_buffer to define this
+        # type of variables
+        self.register_buffer('tril', torch.tril(torch.ones(self.context_size, self.context_size)))
+
+    def forward(self, x):
+
+        b, t, embed_dim = x.shape
+
+        k = self.key(x)     # [B, T, embed_dim] = [B,T, embed_dim] @ [B, embed_dim, head_size] = [B,T, head_size]
+        q = self.query(x)   # [B, T, embed_dim]
+
+        wei = k @ q.transpose(1, 2) / embed_dim**0.5  # [B,T, embed_dim] @ [B,embed_dim, T] = [B, T, T]
+        wei = torch.masked_fill(wei, self.tril[:t, :t] == 0, float('-inf'))  # [B, T, T]
+        wei = F.softmax(wei, dim=1)  # [B, T, T]
+
+        v = self.value(x)  # [B,T,embed_dim]
+        out = wei @ v  # [B, T, T] @ [B, T, embed_dim] = [B, T,embed_dim]
+
+        return out
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, embed_dim, context_size):
+        """
+        Multiple blocks of self attention in Parallel
+        """
+        super().__init__()
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.head_size = embed_dim // num_heads
+        self.context_size = context_size
+
+        self.heads = nn.ModuleList(
+            [Head(self.embed_dim // self.num_heads, self.embed_dim, self.context_size) for _ in range(num_heads)])
+
+        # notice that the head size  (the number of output channels is divided by the number of heads.)
+        # 1. Each Head will produce self.embedding_dim/ self. n_head values.
+        # 2. These will then be concatenated along output channel dim
+        # 3. This will restore output back to the embedding size
+        # Note that they need to be perfectly divisiable to make sense
+
+    def forward(self, x):
+        # do self attention in parallel and then concatenate the output.
+
+        # x = [B,T, embed_size]
+        # Each self attention block returns  [B,T, embedded_size], we concatenate the outputs along channel dimension
+        out = [h(x) for h in self.heads]  # list of [B,T, embedded_size] with n_head elements
+        out = torch.cat(out, dim=2)
+
+        return out
+
+
+class TransFormerModel(nn.Module):
+    def __init__(self, vocab_size_1, embed_dim_1, context_size_1, device, n_heads):
+        """
+        Only self attention
+
+        :param vocab_size_1:
+        :param embed_dim_1:
+        :param context_size_1:
+        :param device:
+        :param n_heads:
+        """
+
+        super().__init__()
+        self.vocab_size = vocab_size_1
+        self.embed_dim = embed_dim_1
+        self.context_size = context_size_1
+        self.device = device
+        self.n_heads = n_heads
+
+        # Character-level embedding
+        self.token_embedding_table = nn.Embedding(
+            num_embeddings=self.vocab_size, embedding_dim=self.embed_dim)
+
+        # Positional Embedding
+        self.pos_embedding_table = nn.Embedding(
+            num_embeddings=self.context_size, embedding_dim=self.embed_dim)
+
+        # Map from embedding dimension to character level.
+        # Used at the end of the model
+        self.lm_head = nn.Linear(self.embed_dim, self.vocab_size)  # lm = language model
+
+        # self.sa_head = Head(self.embed_dim, self.embed_dim, self.context_size)  # self attention Head
+        self.sa_head = \
+            MultiHeadAttention(self.n_heads, self.embed_dim, self.context_size)
+
+    def forward(self, input_idx_arr, tgt_labels_arr=None):
+        """ Given an [B,T] matrix of indexes and [B,T] array of labels, get embeddings and compare them with labels
+
+        """
+        b, t = input_idx_arr.shape
+
+        # nn.Embeddings returns embeddings for each input
+        token_embeddings = self.token_embedding_table(input_idx_arr)  # [B,T] --> [B, T, embed_dim]
+
+        # [1,T](fixed) --> [T, embed_dim]]
+        position_embeddings = self.pos_embedding_table(torch.arange(t, device=self.device))
+
+        # Add token and position embeddings [B, T, embed_dim] + [T, embed_dim]
+        # Uses broadcasting
+        embeddings = token_embeddings + position_embeddings
+
+        # Pass through self Attention Head
+        embeddings = self.sa_head(embeddings)
+
+        logits1 = self.lm_head(embeddings)
+
+        loss1 = 0
+        if tgt_labels_arr is not None:
+            # Compare predictions with labels using negative cross entropy
+
+            # Reshape the input and the label to shapes expected by pytorch cross_entropy function
+            # cross entropy expects the second dimension to be the number of classes
+            # Each embedding represents a character
+
+            # Include the time axis with batch, to get one prediction to get (b*t, ch). We one prediction for each
+            # batch and time and this is what cross entropy expects.
+            logits1_flatten = logits1.view(b * t, self.vocab_size)
+            tgt_labels_arr = tgt_labels_arr.view(b*t)
+            loss1 = F.cross_entropy(logits1_flatten, tgt_labels_arr)
+
+        return logits1, loss1
+
+    def generate(self, input_idx_arr, n_new_tokens):
+        """
+        Given an input_idx_arr of size [B, T(Time)] generate n_new tokens for each B(batch)
+        :param input_idx_arr:
+        :param n_new_tokens:
+        :return:  [1, n_new_token_size]
+        """
+        for n_idx in range(n_new_tokens):
+            # somehow calls the forward function. Prob a feature of nn.Module
+            logits2, loss2 = self(input_idx_arr[:, -self.context_size:])
+
+            logits2 = logits2[:, -1, :]  # predict the next one character only
+            # Get the last time, set of logits
+            probs = F.softmax(logits2, dim=1)
+
+            # chooses 1 (num_samples) of probs, based on probabilities specified in probs
             idx_next = torch.multinomial(probs, num_samples=1, replacement=True)
             input_idx_arr = torch.cat((input_idx_arr, idx_next), dim=1)  # on time axes
 
@@ -143,6 +311,10 @@ def main(raw_data_strings):
     batch_size = 256
     n_iters = 10000
     n_eval_iters = 200
+    embed_dim = 32
+    learning_rate = 1e-3
+    eval_interval = 500
+    n_heads = 4
 
     # ----------------------------------------------------------------------------
     # Create Vocab
@@ -195,7 +367,7 @@ def main(raw_data_strings):
     # note  the value of wy and how it is used. This is used for training with different sequence lengths.
 
     # Actual Data loader
-    x_in, y_label = get_batch('train', batch_size, context_size, train_data, val_data, device)
+    # x_in, y_label = get_batch('train', batch_size, context_size, train_data, val_data, device)
     # x_in = [B, T], y_in = [B,T]; B = Batch, T = Time
 
     # for b in range(batch_size):
@@ -209,14 +381,16 @@ def main(raw_data_strings):
     # Model - Simple Bigram Model
     # Predicts the probability of the next work, given only the previous word.
     # ----------------------------------------------------------------------------
-    model1 = BigramLanguageModel(vocab_size)
+    # model1 = BigramLanguageModel(vocab_size)
+    model1 = TransFormerModel(vocab_size, embed_dim, context_size, device, n_heads)
+
     model1.to(device)
 
     # logits, loss = model1(x_in, y_label)
     # print("Loss {}".format(loss))
 
     # Get some predicts
-    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 50)
+    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 300)
     output = ''.join(itoc[i.item()] for i in predicts[0])
     print("Generated text {}".format(output))
 
@@ -224,15 +398,15 @@ def main(raw_data_strings):
     # Train the Model
     # ----------------------------------------------------------------------------
     print("Starting Training")
-    optimizer = torch.optim.Adam(model1.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model1.parameters(), lr=learning_rate)
 
     model1.train()
     yb_loss = 0
     idx = 0
     for idx in range(n_iters):
-        xb, yb = get_batch('train', batch_size, context_size, train_data, val_data,device)
+        xb, yb = get_batch('train', batch_size, context_size, train_data, val_data, device)
 
-        if idx % 1000 == 0:
+        if idx % eval_interval == 0:
             losses_evaluated = \
                 evaluate_loss(model1, n_eval_iters, batch_size, context_size, train_data, val_data, device)
             print("{} Train {:0.4f}, Val {:0.4f}".format(idx, losses_evaluated['train'], losses_evaluated['val']))
@@ -250,7 +424,7 @@ def main(raw_data_strings):
     # Test the model
     # ----------------------------------------------------------------------------
     # Get some predicted names
-    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 50)
+    predicts = model1.generate(torch.zeros((1, 1), dtype=torch.long).to(device), 300)
     output = ''.join(itoc[i.item()] for i in predicts[0])
     print("Generated text after training: {}".format(output))
 
