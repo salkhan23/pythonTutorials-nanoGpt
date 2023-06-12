@@ -433,7 +433,7 @@ def main(raw_data_strings):
 
 
 if __name__ == "__main__":
-    set_random_seed(9)
+    set_random_seed(10)
 
     data_file = './data/input.txt'
     with open(data_file, 'r') as handle:
